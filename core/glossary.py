@@ -81,6 +81,20 @@ GLOSSARY = {
     "In-sample vs out-of-sample": "In-sample = data the system learned on. "
                                   "Out-of-sample = fresh data it was then tested on. "
                                   "Out-of-sample is the honest measure.",
+
+    # --- Horizons ---
+    "Short-term": "Holding less than 3 months. Driven by recent momentum and "
+                  "timing. You're renting the move, not marrying the stock.",
+    "Medium-term": "Holding 3 months to 1 year. A balance of momentum and the "
+                   "bigger trend. Sit through normal wobbles, respect real breaks.",
+    "Long-term": "Holding 1 to 2+ years. Driven by trend durability. Wide stops, "
+                 "minimal churn, let a compounding winner run.",
+    "STCG": "Short-Term Capital Gains tax — on gains from holdings sold within "
+            "12 months. Taxed higher (15% in India).",
+    "LTCG": "Long-Term Capital Gains tax — on holdings sold after 12 months. "
+            "Taxed lower (10% over ₹1L/year in India). More tax-efficient.",
+    "Rebalance": "How often you review and adjust positions. More often for "
+                 "short-term, rarely for long-term.",
 }
 
 
