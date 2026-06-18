@@ -1,0 +1,23 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# App data — NEVER commit your personal holdings
+portfolio.json
+price_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Secrets — never commit API keys / broker creds
+.env
+secrets.toml
+.streamlit/secrets.toml
