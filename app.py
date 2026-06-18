@@ -31,6 +31,9 @@ from core import regime as RG
 from core import guardrails as G
 from core import walkforward as WF
 from core import glossary as GL
+from core import horizons as HZ
+from core import advisor as ADV
+from core import broker as BRK
 from data import data as D
 
 st.set_page_config(page_title="NSE Dual-Horizon Screener", layout="wide",
@@ -90,7 +93,8 @@ def analyze_single(symbol, period, horizon, use_news, _universe_raw=None):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def build_scores(period, horizon, min_turnover, use_news, sector_neutral):
+def build_scores(period, horizon, min_turnover, use_news, sector_neutral,
+                 require_above_ema200=False):
     uni, bench = load_universe(period)
     rows = {}
     for sym, df in uni.items():
@@ -104,7 +108,8 @@ def build_scores(period, horizon, min_turnover, use_news, sector_neutral):
     if raw.empty:
         return raw, uni, bench
     raw = SEC.attach_sectors(raw)
-    filt = S.apply_hard_filters(raw, min_turnover_cr=min_turnover)
+    filt = S.apply_hard_filters(raw, min_turnover_cr=min_turnover,
+                                require_above_ema200=require_above_ema200)
     if filt.empty:
         return filt, uni, bench
     scored = S.score_universe(filt, horizon=horizon, sector_neutral=sector_neutral)
@@ -146,9 +151,9 @@ atr_mult = st.sidebar.slider("Stop = N × ATR", 1.0, 4.0, 2.0, 0.5,
 reward_mult = st.sidebar.slider("Reward : Risk", 1.0, 4.0, 2.0, 0.5,
     help=GL.tip("Reward:risk"))
 
-tab1, tab2, tab3, tab6, tab4, tab5 = st.tabs(
-    ["📊 Screener", "🔍 Stock", "💰 Trade Plan", "📍 Positions",
-     "🧪 Backtest", "ℹ️ About"])
+tab1, tab7, tab2, tab3, tab6, tab8, tab4, tab5 = st.tabs(
+    ["📊 Screener", "🎯 Horizon View", "🔍 Stock", "💰 Trade Plan",
+     "📍 Positions", "📁 My Portfolio", "🧪 Backtest", "ℹ️ About"])
 
 # ===================== TAB 1: SCREENER =====================
 with tab1:
@@ -221,8 +226,97 @@ with tab1:
         st.download_button("⬇️ Download watchlist (CSV)",
                            view.to_csv().encode(), "watchlist.csv")
 
-# ===================== TAB 2: STOCK DRILL-DOWN =====================
-with tab2:
+# ===================== TAB 7: HORIZON VIEW =====================
+with tab7:
+    st.title("Horizon View")
+    st.caption("Pick how long you plan to hold — the analysis re-tunes itself for "
+               "that timeframe (what matters, stops, targets, and tax).")
+    with st.expander("📖 Plain-English glossary for this tab"):
+        st.markdown(GL.render_glossary_md([
+            "Short-term", "Medium-term", "Long-term", "Rebalance",
+            "STCG", "LTCG", "Stop", "Target"]))
+
+    # horizon picker
+    choice = st.radio(
+        "Your holding horizon",
+        options=HZ.ORDER,
+        format_func=lambda k: f"{HZ.PROFILES[k]['label']} ({HZ.PROFILES[k]['window']})",
+        horizontal=True,
+    )
+    prof = HZ.get(choice)
+
+    # explain the profile
+    pcol = st.columns(4)
+    pcol[0].metric("Timeframe", prof["window"])
+    pcol[1].metric("Scoring style", prof["scoring_horizon"],
+                   help="tactical = momentum-led · structural = trend-led · blend = both")
+    pcol[2].metric("Typical hold", f"~{prof['hold_days']} trading days")
+    pcol[3].metric("Stop width", f"{prof['atr_stop_mult']}× ATR",
+                   help="Wider for longer horizons so normal swings don't shake you out.")
+
+    st.markdown(f"**✅ What good looks like for {prof['label'].lower()}:** "
+                f"{prof['what_good_looks_like']}")
+    st.markdown(f"**⚠️ Watch out:** {prof['watch_out']}")
+    st.info(f"🧾 **Tax:** {prof['tax_note']}")
+    st.caption(f"Suggested rebalance cadence: **{prof['rebalance']}**.")
+
+    st.markdown("---")
+    st.subheader(f"Top picks for a {prof['label'].lower()} horizon")
+
+    with st.spinner(f"Scoring the universe for a {prof['label'].lower()} horizon..."):
+        hz_scored, hz_uni, hz_bench = build_scores(
+            period, prof["scoring_horizon"], prof["min_turnover_cr"],
+            use_news, sector_neutral,
+            require_above_ema200=prof["require_above_ema200"])
+
+    if hz_scored.empty:
+        st.warning("No stocks passed this horizon's filters (or no data fetched). "
+                   "Longer horizons require price above the 200-day trend, so fewer "
+                   "names qualify in a weak market — that's by design.")
+    else:
+        if sector_neutral:
+            hz_view = S.apply_sector_cap(hz_scored, top_n=top_n,
+                                         max_per_sector=max_per_sector)
+        else:
+            hz_view = hz_scored.head(top_n)
+
+        cols = ["rank", "final_score", "tactical_score", "structural_score",
+                "sector", "turnover_cr", "reason"]
+        hz_tbl = hz_view[[c for c in cols if c in hz_view.columns]].copy()
+        hz_tbl.index.name = "Symbol"
+        try:
+            hz_styled = hz_tbl.style.background_gradient(subset=["final_score"], cmap="RdYlGn")
+        except ImportError:
+            hz_styled = hz_tbl
+        st.dataframe(hz_styled, use_container_width=True, height=440)
+        st.caption(f"Filtered & ranked for {prof['label'].lower()} holding. "
+                   f"{'Only stocks above their 200-day trend are shown.' if prof['require_above_ema200'] else 'Momentum-led: includes names that are hot now.'}")
+
+        # quick trade-plan preview for the top name at THIS horizon's stop/target style
+        st.markdown("##### Example trade plan (top pick, tuned to this horizon)")
+        top_sym = hz_view.index[0]
+        top_df = hz_uni.get(top_sym)
+        if top_df is not None:
+            hz_plan = R.plan_trade(top_df, capital=capital, risk_pct=risk_pct,
+                                   atr_mult_stop=prof["atr_stop_mult"],
+                                   reward_multiple=prof["reward_mult"])
+            if "error" not in hz_plan:
+                tc = st.columns(5)
+                tc[0].metric("Stock", top_sym)
+                tc[1].metric("Entry", f"₹{hz_plan['entry']:,.2f}", help=GL.tip("Entry"))
+                tc[2].metric("Stop", f"₹{hz_plan['stop']:,.2f}",
+                             help=f"{prof['atr_stop_mult']}× ATR — {GL.tip('Stop')}")
+                tc[3].metric("Target", f"₹{hz_plan['target']:,.2f}", help=GL.tip("Target"))
+                tc[4].metric("Shares", f"{hz_plan['shares']:,}",
+                             help=GL.tip("Position sizing"))
+                st.caption(f"Stop and target use this horizon's wider/tighter style "
+                           f"({prof['atr_stop_mult']}× ATR stop, "
+                           f"{prof['reward_mult']}:1 reward:risk). Mechanical levels, not advice.")
+        st.download_button("⬇️ Download these picks (CSV)",
+                           hz_tbl.to_csv().encode(),
+                           f"horizon_{choice}_picks.csv")
+
+
     st.title("Stock Search & Analysis")
     st.caption("Type any NSE symbol (e.g. RELIANCE, IRCTC, ZOMATO) — analyzed live, "
                "even if it's not in the default universe.")
@@ -531,6 +625,152 @@ with tab6:
                     wins = (cdf["pnl"] > 0).sum()
                     st.caption(f"Realized: ₹{cdf['pnl'].sum():,.0f} · "
                                f"win rate {wins}/{len(cdf)} ({wins/len(cdf)*100:.0f}%)")
+
+# ===================== TAB 8: MY PORTFOLIO =====================
+with tab8:
+    st.title("My Portfolio")
+    st.caption("Your private holdings, saved only on your computer. For each one, "
+               "the system tells you HOLD or exactly how many shares to SELL.")
+    with st.expander("📖 Plain-English glossary for this tab"):
+        st.markdown(GL.render_glossary_md([
+            "HOLD", "TRIM", "EXIT", "Stop", "Risk per trade", "Open P&L",
+            "Realized P&L", "STCG", "LTCG"]))
+
+    st.info("🔒 **Private:** holdings are stored in `portfolio.json` on your machine "
+            "only — never uploaded, never in the GitHub repo. Broker auto-import "
+            "is coming; for now, add them below.", icon="🔒")
+
+    pf = ST.load()
+    holdings = pf.get("positions", [])
+
+    # --- broker connect (stub) ---
+    bcol1, bcol2 = st.columns([1, 3])
+    if bcol1.button("🔗 Connect broker"):
+        if BRK.is_connected():
+            imported = BRK.fetch_holdings_from_broker()
+            st.success(f"Imported {len(imported)} holdings.")
+        else:
+            bcol2.warning("Broker API not wired in yet — this is the seam for "
+                          "Zerodha/Upstox later. Add holdings manually for now.")
+
+    # --- add holding ---
+    with st.expander("➕ Add a holding", expanded=not holdings):
+        hc = st.columns(4)
+        h_sym = hc[0].text_input("Symbol", key="pf_sym").strip().upper()
+        h_entry = hc[1].number_input("Avg buy price ₹", min_value=0.0, value=0.0, step=1.0, key="pf_entry")
+        h_shares = hc[2].number_input("Shares", min_value=0, value=0, step=1, key="pf_shares")
+        h_stop = hc[3].number_input("Stop ₹ (optional)", min_value=0.0, value=0.0, step=1.0, key="pf_stop")
+        if st.button("Add to portfolio"):
+            if h_sym and h_entry > 0 and h_shares > 0:
+                # default stop = 10% below entry if not given
+                stop = h_stop if h_stop > 0 else round(h_entry * 0.9, 2)
+                ST.add_position(h_sym, h_entry, int(h_shares), stop, None)
+                st.success(f"Added {h_sym}.")
+                st.rerun()
+            else:
+                st.warning("Need symbol, buy price, and shares.")
+
+    if not holdings:
+        st.info("No holdings yet. Add one above to get sell/hold guidance.")
+    else:
+        # risk knob for the advice
+        rc = st.columns(3)
+        adv_risk = rc[0].slider("Max risk per position (%)", 0.5, 5.0, 2.0, 0.5,
+            help="Used by the risk-based trim suggestion.")
+        adv_trail = rc[1].slider("Trailing stop × ATR", 1.0, 5.0, 3.0, 0.5,
+            help=GL.tip("Trailing stop"))
+
+        with st.spinner("Fetching live prices & generating advice..."):
+            price_data = {}
+            for p in holdings:
+                d = D.fetch_ohlcv(p["symbol"], period=period)
+                if d is not None:
+                    price_data[p["symbol"]] = d
+
+        # portfolio summary
+        total_value = 0
+        total_cost = 0
+        priced = 0
+        advisories = []
+        for p in holdings:
+            df = price_data.get(p["symbol"])
+            frow = scored.loc[p["symbol"]] if (scored is not None and not scored.empty
+                                               and p["symbol"] in scored.index) else None
+            adv = ADV.advise_position(p, df, capital, factor_row=frow,
+                                      atr_trail_mult=adv_trail, max_risk_pct=adv_risk)
+            advisories.append((p, adv))
+            if "error" not in adv:
+                total_value += adv["price"] * p["shares"]
+                total_cost += adv["entry"] * p["shares"]
+                priced += 1
+
+        sm = st.columns(4)
+        sm[0].metric("Holdings", len(holdings))
+        sm[1].metric("Current value", f"₹{total_value:,.0f}")
+        sm[2].metric("Total P&L", f"₹{total_value - total_cost:,.0f}",
+                     f"{((total_value/total_cost - 1)*100) if total_cost else 0:+.1f}%")
+        sm[3].metric("Priced", f"{priced}/{len(holdings)}")
+
+        st.markdown("---")
+
+        # per-holding advice cards
+        for p, adv in advisories:
+            if "error" in adv:
+                st.warning(f"**{p['symbol']}** — couldn't fetch price "
+                           f"({adv['error']}). Held: {p['shares']} @ ₹{p['entry_price']}.")
+                continue
+
+            vcolor = {"SELL ALL": "🔴", "TRIM (winner)": "🟡",
+                      "HOLD": "🟢"}.get(adv["verdict"], "⚪")
+            with st.container(border=True):
+                hh = st.columns([3, 1, 1, 1])
+                hh[0].markdown(f"### {vcolor} {adv['symbol']} — **{adv['verdict']}**")
+                hh[1].metric("Price", f"₹{adv['price']:,.2f}")
+                hh[2].metric("Gain", f"{adv['gain_pct']:+.0f}%")
+                hh[3].metric("P&L", f"₹{adv['pnl_abs']:,.0f}")
+                st.markdown(f"_{adv['headline']}_")
+
+                if adv["verdict"] in ("TRIM (winner)", "SELL ALL"):
+                    st.markdown("**Your selling options — pick one:**")
+                    s = adv["strategies"]
+                    order = ["scale_out", "recover_capital", "risk_trim", "trail_only"]
+                    for key in order:
+                        plan = s.get(key)
+                        if not plan:
+                            continue
+                        sell = plan["sell_shares"]
+                        keep = plan["keep_shares"]
+                        if sell > 0:
+                            badge = f"**SELL {sell}** shares · keep {keep}"
+                        else:
+                            badge = f"**HOLD all {keep}**"
+                        st.markdown(f"- _{plan['strategy']}:_ {badge}  \n"
+                                    f"  <span style='color:#8b949e;font-size:0.85rem'>"
+                                    f"{plan['rationale']}</span>", unsafe_allow_html=True)
+
+                # manage buttons
+                mc = st.columns(4)
+                if mc[0].button("Mark sold (all)", key=f"sold_{p['id']}"):
+                    ST.close_position(p["id"], adv["price"], "manual sell all")
+                    st.rerun()
+                if mc[1].button("Remove", key=f"del_{p['id']}"):
+                    ST.remove_position(p["id"])
+                    st.rerun()
+
+        # closed/realized
+        closed = pf.get("closed", [])
+        if closed:
+            with st.expander(f"📒 Sold / closed ({len(closed)})"):
+                cdf = pd.DataFrame(closed)
+                show = [c for c in ["symbol", "entry_price", "exit_price", "pnl",
+                        "pnl_pct", "exit_reason", "exit_date"] if c in cdf.columns]
+                st.dataframe(cdf[show], use_container_width=True)
+                if "pnl" in cdf:
+                    st.caption(f"Realized total: ₹{cdf['pnl'].sum():,.0f}")
+
+    st.caption("⚠️ Mechanical suggestions based on price/risk math, **not financial "
+               "advice**. You decide and place orders in your broker. Consider taxes "
+               "(STCG/LTCG) before selling.")
 
 # ===================== TAB 4: BACKTEST =====================
 with tab4:
