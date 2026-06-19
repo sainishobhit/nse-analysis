@@ -34,6 +34,7 @@ from core import glossary as GL
 from core import horizons as HZ
 from core import advisor as ADV
 from core import broker as BRK
+from core import tax as TAX
 from data import data as D
 
 st.set_page_config(page_title="NSE Dual-Horizon Screener", layout="wide",
@@ -655,16 +656,20 @@ with tab8:
 
     # --- add holding ---
     with st.expander("➕ Add a holding", expanded=not holdings):
-        hc = st.columns(4)
+        hc = st.columns(5)
         h_sym = hc[0].text_input("Symbol", key="pf_sym").strip().upper()
         h_entry = hc[1].number_input("Avg buy price ₹", min_value=0.0, value=0.0, step=1.0, key="pf_entry")
         h_shares = hc[2].number_input("Shares", min_value=0, value=0, step=1, key="pf_shares")
         h_stop = hc[3].number_input("Stop ₹ (optional)", min_value=0.0, value=0.0, step=1.0, key="pf_stop")
+        h_date = hc[4].date_input("Buy date", value=None, key="pf_date",
+                                  help="Used to work out STCG vs LTCG tax when you sell.")
         if st.button("Add to portfolio"):
             if h_sym and h_entry > 0 and h_shares > 0:
                 # default stop = 10% below entry if not given
                 stop = h_stop if h_stop > 0 else round(h_entry * 0.9, 2)
-                ST.add_position(h_sym, h_entry, int(h_shares), stop, None)
+                bdate = h_date.isoformat() if h_date else None
+                ST.add_position(h_sym, h_entry, int(h_shares), stop, None,
+                                entry_date=bdate)
                 st.success(f"Added {h_sym}.")
                 st.rerun()
             else:
@@ -711,6 +716,43 @@ with tab8:
                      f"{((total_value/total_cost - 1)*100) if total_cost else 0:+.1f}%")
         sm[3].metric("Priced", f"{priced}/{len(holdings)}")
 
+        # ---- portfolio-wide tax preview (if everything sold today) ----
+        used_exemption = 0.0
+        total_tax = 0.0
+        total_gain_taxable = 0.0
+        any_dates = False
+        for p, adv in advisories:
+            if "error" in adv:
+                continue
+            if not p.get("entry_date"):
+                continue
+            any_dates = True
+            prev = TAX.sale_tax_preview(adv["entry"], adv["price"], p["shares"],
+                                        p.get("entry_date"),
+                                        ltcg_used_exemption=used_exemption)
+            total_tax += prev["est_tax"]
+            if prev["term"] == "LTCG":
+                # consume exemption by the gain that was shielded
+                shielded = prev["realized_gain"] - (prev["est_tax"] / TAX.LTCG_RATE
+                                                    if prev["est_tax"] > 0 else prev["realized_gain"])
+                used_exemption += max(0, prev["realized_gain"] - max(0, prev["realized_gain"] - shielded))
+            total_gain_taxable += max(0, prev["realized_gain"])
+
+        if any_dates:
+            tcol = st.columns(3)
+            tcol[0].metric("Gain if all sold", f"₹{total_gain_taxable:,.0f}")
+            tcol[1].metric("Est. tax if all sold", f"₹{total_tax:,.0f}",
+                           help="Estimate using the yearly LTCG exemption shared "
+                                "across holdings. Confirm rates with a CA.")
+            remaining = max(0, TAX.LTCG_EXEMPTION - used_exemption)
+            tcol[2].metric("LTCG exemption left", f"₹{remaining:,.0f}",
+                           help=f"Of the ₹{TAX.LTCG_EXEMPTION:,.0f} yearly long-term "
+                                f"exemption, this much is still unused.")
+            if total_tax == 0:
+                st.success("🧾 Selling these now would likely incur **≈ zero tax** — "
+                           "your gains fit inside the yearly LTCG exemption. (Assumes "
+                           "no other equity sales this year; confirm with a CA.)")
+
         st.markdown("---")
 
         # per-holding advice cards
@@ -729,6 +771,18 @@ with tab8:
                 hh[2].metric("Gain", f"{adv['gain_pct']:+.0f}%")
                 hh[3].metric("P&L", f"₹{adv['pnl_abs']:,.0f}")
                 st.markdown(f"_{adv['headline']}_")
+
+                # tax classification for this holding
+                cls = TAX.classify_holding(p.get("entry_date"))
+                if cls["term"] == "LTCG":
+                    st.caption(f"🧾 **LTCG** (held {cls['days_held']} days) — "
+                               f"long-term, taxed at the lower rate, with yearly "
+                               f"exemption applied across your sales.")
+                elif cls["term"] == "STCG":
+                    st.caption(f"🧾 **STCG** (held {cls['days_held']} days) — "
+                               f"short-term, taxed higher. {cls['note']}")
+                else:
+                    st.caption("🧾 Add a buy date (edit/re-add) to estimate sell tax.")
 
                 if adv["verdict"] in ("TRIM (winner)", "SELL ALL"):
                     st.markdown("**Your selling options — pick one:**")
