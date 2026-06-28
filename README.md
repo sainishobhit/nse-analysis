@@ -119,11 +119,32 @@ Turns the watchlist into a real trade plan:
 > concurrent names or lower the per-position cap. The **heat limit** is the real
 > risk guardrail — keep it where you can stomach the drawdown.
 
-## The discipline, restated
+## AI analysis (core/ai_analyst.py)
 
-Stops are mechanical. If you don't honor them, the position-sizing math is
-meaningless and the whole risk framework collapses. The system can rank and
-size; only you can be disciplined.
+On-demand Claude-powered reads of any stock. Click 🤖 **AI Read** in the Stock
+tab or on any holding in My Portfolio — Claude synthesizes the factor scores,
+price action, sector, news, and (for holdings) your entry/days-held into a
+structured plain-English read: summary, strengths, risks, and a tagged
+recommendation (BUY_WATCH / HOLD / TRIM / AVOID) with a confidence note.
+
+**What it is:** synthesis of the data the system already computes — it ties the
+numbers together in language. **What it isn't:** a price predictor. It will not
+tell you the future. The verbal read sits alongside the numeric scores so you
+see both.
+
+**Setup:**
+1. Get an API key from [console.anthropic.com](https://console.anthropic.com).
+2. Copy `.env.example` to `.env` and paste your key.
+3. `pip install anthropic python-dotenv` (already in requirements.txt).
+4. Restart the app.
+
+**Cost:** uses Claude Haiku 4.5 by default (~₹0.25-0.30 per analysis). Results
+are cached for 1 hour per stock so repeated taps don't re-bill. The cost
+estimate appears under each AI Read.
+
+**Privacy:** your API key lives in `.env` only (gitignored, never committed).
+The app sends only the stock's structured data — not your portfolio P&L or
+identity — to Claude. Anthropic's API does not train on API traffic.
 
 ## Positions & Exit Monitor (core/monitor.py + core/store.py)
 

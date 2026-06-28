@@ -18,6 +18,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# Load .env (for ANTHROPIC_API_KEY etc.). Silent if python-dotenv isn't installed.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 sys.path.insert(0, os.path.dirname(__file__))
 from core import factors as F
 from core import scoring as S
@@ -35,6 +42,7 @@ from core import horizons as HZ
 from core import advisor as ADV
 from core import broker as BRK
 from core import tax as TAX
+from core import ai_analyst as AI
 from data import data as D
 
 st.set_page_config(page_title="NSE Dual-Horizon Screener", layout="wide",
@@ -117,6 +125,50 @@ def build_scores(period, horizon, min_turnover, use_news, sector_neutral,
     scored["reason"] = scored.apply(S.build_reason, axis=1)
     scored["turnover_cr"] = (scored["avg_turnover_20d"] / 1e7).round(2)
     return scored, uni, bench
+
+
+def render_ai_read(result: dict):
+    """Render an AI analysis result inside a container with consistent styling."""
+    if "error" in result:
+        st.error(f"🤖 AI unavailable: {result['error']}")
+        if "Run: pip install anthropic" in result["error"]:
+            st.caption("Install: `pip install anthropic python-dotenv` "
+                       "then add `ANTHROPIC_API_KEY=sk-ant-...` to a `.env` file in "
+                       "the project root. Get a key at "
+                       "[console.anthropic.com](https://console.anthropic.com).")
+        return
+    rec_colors = {"BUY_WATCH": "🟢", "HOLD": "🟡", "TRIM": "🟠", "AVOID": "🔴"}
+    rec = result.get("recommendation", "HOLD")
+    conf = result.get("confidence", "medium")
+    icon = rec_colors.get(rec, "⚪")
+    with st.container(border=True):
+        st.markdown(f"### 🤖 AI Read — {icon} **{rec}** "
+                    f"<span style='color:#8b949e;font-size:0.9rem'>(confidence: {conf})</span>",
+                    unsafe_allow_html=True)
+        st.markdown(f"_{result.get('summary','')}_")
+        cc = st.columns(2)
+        strengths = result.get("strengths", [])
+        risks = result.get("risks", [])
+        if strengths:
+            cc[0].markdown("**✅ Strengths**")
+            for s in strengths:
+                cc[0].markdown(f"- {s}")
+        if risks:
+            cc[1].markdown("**⚠️ Risks**")
+            for r in risks:
+                cc[1].markdown(f"- {r}")
+        if result.get("rationale"):
+            st.caption(f"💡 _{result['rationale']}_")
+        meta_bits = []
+        if result.get("cached"):
+            meta_bits.append("cached")
+        if result.get("cost_estimate_inr") is not None:
+            meta_bits.append(f"~₹{result['cost_estimate_inr']:.3f}")
+        if result.get("model"):
+            meta_bits.append(result["model"].replace("claude-", ""))
+        if meta_bits:
+            st.caption(" · ".join(meta_bits)
+                       + " · ⚠️ AI synthesis of the data shown — not advice, not a prediction.")
 
 
 # ===================== SIDEBAR =====================
@@ -410,6 +462,27 @@ with tab7:
                            f"Mechanical levels, not advice.")
             else:
                 st.caption(f"Trade plan unavailable: {plan['error']}")
+
+            # --- AI Read button ---
+            st.markdown("---")
+            ai_col1, ai_col2 = st.columns([1, 3])
+            if ai_col1.button("🤖 AI Read", key=f"ai_stock_{sym}",
+                              help="Run Claude AI on this stock's data for a plain-English read."):
+                with st.spinner("Asking Claude..."):
+                    factor_dict = row.to_dict() if row is not None else {}
+                    news_sig = N.analyze(sym).to_dict() if use_news else {}
+                    ai_result = AI.analyze_stock(
+                        symbol=sym,
+                        factor_row=factor_dict,
+                        price_summary={"ltp": ltp, "change_pct": chg,
+                                       "high_52w": float(close.tail(252).max()) if len(close) >= 60 else None,
+                                       "low_52w": float(close.tail(252).min()) if len(close) >= 60 else None},
+                        sector=sec,
+                        news_signal=news_sig,
+                    )
+                    st.session_state[f"ai_result_{sym}"] = ai_result
+            if f"ai_result_{sym}" in st.session_state:
+                render_ai_read(st.session_state[f"ai_result_{sym}"])
 
 # ===================== TAB 3: TRADE PLAN =====================
 with tab3:
@@ -810,6 +883,29 @@ with tab8:
                 if mc[1].button("Remove", key=f"del_{p['id']}"):
                     ST.remove_position(p["id"])
                     st.rerun()
+                if mc[2].button("🤖 AI Read", key=f"ai_pf_{p['id']}",
+                                help="Run Claude AI on this holding's data."):
+                    with st.spinner("Asking Claude..."):
+                        frow_dict = scored.loc[p["symbol"]].to_dict() if (
+                            scored is not None and not scored.empty
+                            and p["symbol"] in scored.index) else {}
+                        news_sig = N.analyze(p["symbol"]).to_dict() if use_news else {}
+                        cls_info = TAX.classify_holding(p.get("entry_date"))
+                        ai_res = AI.analyze_stock(
+                            symbol=p["symbol"],
+                            factor_row=frow_dict,
+                            price_summary={"ltp": adv["price"],
+                                           "gain_from_entry_pct": adv["gain_pct"]},
+                            sector=SEC.sector_of(p["symbol"]),
+                            news_signal=news_sig,
+                            holding={"entry_price": p["entry_price"],
+                                     "shares": p["shares"],
+                                     "days_held": cls_info.get("days_held"),
+                                     "tax_status": cls_info.get("term")},
+                        )
+                        st.session_state[f"ai_pf_result_{p['id']}"] = ai_res
+                if f"ai_pf_result_{p['id']}" in st.session_state:
+                    render_ai_read(st.session_state[f"ai_pf_result_{p['id']}"])
 
         # closed/realized
         closed = pf.get("closed", [])
