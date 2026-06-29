@@ -43,6 +43,7 @@ from core import advisor as ADV
 from core import broker as BRK
 from core import tax as TAX
 from core import ai_analyst as AI
+from core import groww_import as GW
 from data import data as D
 
 st.set_page_config(page_title="NSE Dual-Horizon Screener", layout="wide",
@@ -726,6 +727,57 @@ with tab8:
         else:
             bcol2.warning("Broker API not wired in yet — this is the seam for "
                           "Zerodha/Upstox later. Add holdings manually for now.")
+
+    # --- import from Groww MCP (via Claude) ---
+    with st.expander("📥 Import from Groww MCP (via Claude.ai)", expanded=False):
+        st.markdown(
+            "Your Groww account is already connected to Claude via MCP. The app "
+            "can't query MCP directly (it's authenticated to your claude.ai "
+            "session, not this app), but you can bring your holdings across in "
+            "10 seconds:"
+        )
+        st.markdown(
+            "**1.** Open claude.ai and paste this prompt:\n"
+            "**2.** Copy Claude's reply (the JSON block).\n"
+            "**3.** Paste it below and click Import."
+        )
+        st.code(GW.SUGGESTED_PROMPT, language="text")
+        pasted = st.text_area(
+            "Paste Claude's reply here",
+            height=180, key="mcp_paste",
+            placeholder='[{"trading_symbol": "EDELWEISS", "quantity": 300, ...}]'
+        )
+        ic1, ic2 = st.columns([1, 3])
+        if ic1.button("Import"):
+            res = GW.parse_paste(pasted)
+            if res["warnings"]:
+                for w in res["warnings"]:
+                    st.warning(w)
+            if not res["holdings"]:
+                if not res["warnings"]:
+                    st.error("No valid holdings found in that paste.")
+            else:
+                existing_syms = {p["symbol"] for p in holdings}
+                added = 0
+                duplicates = 0
+                for h in res["holdings"]:
+                    if h["symbol"] in existing_syms:
+                        duplicates += 1
+                        continue
+                    ST.add_position(
+                        h["symbol"], h["entry_price"], h["shares"],
+                        h["stop"], None, entry_date=h.get("entry_date"),
+                    )
+                    added += 1
+                msg = f"✅ Imported {added} holding(s)."
+                if duplicates:
+                    msg += f" Skipped {duplicates} already in your portfolio."
+                if res["skipped"]:
+                    msg += f" Couldn't parse {len(res['skipped'])} row(s)."
+                st.success(msg)
+                st.rerun()
+        ic2.caption("Re-import anytime to refresh. Existing positions aren't "
+                    "duplicated — only new symbols are added.")
 
     # --- add holding ---
     with st.expander("➕ Add a holding", expanded=not holdings):
