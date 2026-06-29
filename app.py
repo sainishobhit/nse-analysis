@@ -48,6 +48,7 @@ from core import news_rss as NR
 from core import context as CTX
 from core import groww_import as GW
 from core import screener_import as SI
+from core import screener_presets as SP
 from data import data as D
 
 st.set_page_config(page_title="NSE Dual-Horizon Screener", layout="wide",
@@ -1157,8 +1158,36 @@ with tabFS:
             "Screener.in already does this part perfectly — we just plug into it."
         )
 
-    with st.expander("📋 Your 17-condition query (copy into Screener)"):
-        st.code(SI.DEFAULT_QUERY_SUGGESTION, language="text")
+    with st.expander("📋 Preset queries — pick one to run on Screener.in",
+                     expanded=False):
+        st.caption("Each preset is a saved Screener.in query. Pick one, copy "
+                   "the block, paste into screener.in/screen/new/, export the "
+                   "CSV, upload below.")
+
+        # category picker (with All option)
+        cats = ["All"] + SP.categories()
+        pick_cat = st.selectbox("Category", cats, key="sp_cat",
+                                help="Growth = explosive earners · Quality = "
+                                     "compounders · Momentum = institutional flows · "
+                                     "Special = combination screens")
+
+        if pick_cat == "All":
+            visible = SP.PRESETS
+        else:
+            visible = SP.by_category(pick_cat)
+
+        names = [p["name"] for p in visible]
+        pick_name = st.selectbox("Preset", names, key="sp_name")
+        preset = SP.by_name(pick_name) if pick_name else None
+
+        if preset:
+            st.markdown(f"**{preset['name']}** "
+                        f"<span style='color:#8b949e'>· {preset['category']}</span>",
+                        unsafe_allow_html=True)
+            st.caption(preset["description"])
+            st.code(preset["query"], language="text")
+            st.caption("⬆️ Copy this block → paste into Screener.in's Query Builder → "
+                       "Run → Export to Excel/CSV → upload below.")
 
     upload = st.file_uploader("Upload Screener.in CSV export", type=["csv"])
     if upload is not None:
