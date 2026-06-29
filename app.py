@@ -44,6 +44,8 @@ from core import broker as BRK
 from core import tax as TAX
 from core import ai_analyst as AI
 from core import ai_usage as AIU
+from core import news_rss as NR
+from core import context as CTX
 from core import groww_import as GW
 from data import data as D
 
@@ -161,6 +163,64 @@ def render_ai_read(result: dict):
                 cc[1].markdown(f"- {r}")
         if result.get("rationale"):
             st.caption(f"💡 _{result['rationale']}_")
+
+        # --- transparency: news sources used ---
+        payload = result.get("payload_sent") or {}
+        news = payload.get("news") or {}
+        items = news.get("items") or []
+        if items:
+            with st.expander(f"📰 News Claude read ({len(items)} headline(s))"):
+                for h in items:
+                    date_str = h.get("date", "")
+                    src = h.get("source", "")
+                    url = h.get("url", "")
+                    title = h.get("title", "")
+                    if url:
+                        st.markdown(f"- [{title}]({url})  \n"
+                                    f"  <span style='color:#8b949e;font-size:0.8rem'>"
+                                    f"{src} · {date_str}</span>",
+                                    unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"- {title}  \n"
+                                    f"  <span style='color:#8b949e;font-size:0.8rem'>"
+                                    f"{src} · {date_str}</span>",
+                                    unsafe_allow_html=True)
+        elif news.get("note"):
+            st.caption(f"📰 _{news['note']}_")
+
+        # --- transparency: technical evidence ---
+        tech = payload.get("technical_context") or {}
+        if tech.get("plain_summary"):
+            with st.expander("📈 Technical evidence Claude saw"):
+                st.markdown(f"_{tech['plain_summary']}_")
+                rets = tech.get("returns") or {}
+                if rets:
+                    rdf = pd.DataFrame([rets]).T
+                    rdf.columns = ["return %"]
+                    rdf.index.name = "period"
+                    st.dataframe(rdf, height=240)
+                meta = []
+                if tech.get("rsi_14") is not None:
+                    meta.append(f"RSI(14): {tech['rsi_14']}")
+                if tech.get("atr_pct") is not None:
+                    meta.append(f"ATR: {tech['atr_pct']}%")
+                if tech.get("max_drawdown_126d_pct") is not None:
+                    meta.append(f"6mo max DD: {tech['max_drawdown_126d_pct']}%")
+                if tech.get("52w_high"):
+                    meta.append(f"52w high: ₹{tech['52w_high']} "
+                                f"({tech.get('pct_from_52w_high', 0):+.1f}%)")
+                if meta:
+                    st.caption(" · ".join(meta))
+
+        # --- transparency: full payload ---
+        if payload:
+            with st.expander("🔬 Full data Claude received (raw JSON)"):
+                st.caption("Everything below is what was sent to the model. "
+                           "No fundamentals (P/E, ROCE, earnings) — this app "
+                           "doesn't have them. Add a fundamentals feed if you "
+                           "want Claude to reason about those.")
+                st.json(payload)
+
         meta_bits = []
         if result.get("cached"):
             meta_bits.append("cached")
@@ -473,17 +533,21 @@ with tab2:
             ai_col1, ai_col2 = st.columns([1, 3])
             if ai_col1.button("🤖 AI Read", key=f"ai_stock_{sym}",
                               help="Run Claude AI on this stock's data for a plain-English read."):
-                with st.spinner("Asking Claude..."):
+                with st.spinner("Building rich context & fetching news..."):
                     factor_dict = row.to_dict() if row is not None else {}
-                    news_sig = N.analyze(sym).to_dict() if use_news else {}
+                    ctx = CTX.build_context(df)
+                    headlines = NR.fetch_headlines(sym, days_back=30, max_headlines=8)
+                    news_sig = NR.summarize_for_ai(headlines)
+                with st.spinner("Asking Claude..."):
                     ai_result = AI.analyze_stock(
                         symbol=sym,
                         factor_row=factor_dict,
                         price_summary={"ltp": ltp, "change_pct": chg,
-                                       "high_52w": float(close.tail(252).max()) if len(close) >= 60 else None,
-                                       "low_52w": float(close.tail(252).min()) if len(close) >= 60 else None},
+                                       "high_52w": ctx.get("52w_high"),
+                                       "low_52w": ctx.get("52w_low")},
                         sector=sec,
                         news_signal=news_sig,
+                        technical_context=ctx,
                     )
                     st.session_state[f"ai_result_{sym}"] = ai_result
             if f"ai_result_{sym}" in st.session_state:
@@ -941,19 +1005,24 @@ with tab8:
                     st.rerun()
                 if mc[2].button("🤖 AI Read", key=f"ai_pf_{p['id']}",
                                 help="Run Claude AI on this holding's data."):
-                    with st.spinner("Asking Claude..."):
+                    df_pf = price_data.get(p["symbol"])
+                    with st.spinner("Building rich context & fetching news..."):
                         frow_dict = scored.loc[p["symbol"]].to_dict() if (
                             scored is not None and not scored.empty
                             and p["symbol"] in scored.index) else {}
-                        news_sig = N.analyze(p["symbol"]).to_dict() if use_news else {}
+                        ctx_pf = CTX.build_context(df_pf) if df_pf is not None else {}
+                        headlines_pf = NR.fetch_headlines(p["symbol"], days_back=30, max_headlines=8)
+                        news_sig_pf = NR.summarize_for_ai(headlines_pf)
                         cls_info = TAX.classify_holding(p.get("entry_date"))
+                    with st.spinner("Asking Claude..."):
                         ai_res = AI.analyze_stock(
                             symbol=p["symbol"],
                             factor_row=frow_dict,
                             price_summary={"ltp": adv["price"],
                                            "gain_from_entry_pct": adv["gain_pct"]},
                             sector=SEC.sector_of(p["symbol"]),
-                            news_signal=news_sig,
+                            news_signal=news_sig_pf,
+                            technical_context=ctx_pf,
                             holding={"entry_price": p["entry_price"],
                                      "shares": p["shares"],
                                      "days_held": cls_info.get("days_held"),

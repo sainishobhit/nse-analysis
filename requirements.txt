@@ -5,3 +5,4 @@ streamlit>=1.30
 matplotlib>=3.7
 anthropic>=0.40
 python-dotenv>=1.0
+feedparser>=6.0

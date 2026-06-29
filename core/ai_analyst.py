@@ -69,18 +69,24 @@ RULES, NON-NEGOTIABLE:
 - You synthesize the given data only. You do NOT predict prices.
 - You do NOT give financial advice; you give a structured READ that helps the user decide.
 - If the data is thin or conflicting, say so. Confidence > confident-sounding.
-- Be brief. The user is looking at this on a phone or laptop dashboard.
 - Mention India-specific context where relevant (sector, regulatory, tax — STCG/LTCG).
-- NEVER invent news or fundamentals not in the input. If sentiment/news fields are empty, say "no news in window."
+- NEVER invent news or fundamentals not in the input. If `news.count` is 0, say "no headlines in the 30-day window."
+
+DESCRIPTIVE STYLE (this is important):
+- Be SPECIFIC. Cite numbers from `technical_context` (returns, RSI, drawdown, EMAs) — do not just say "weak"; say "down 22.7% in 21d, RSI 7 (extreme oversold), below 200-EMA."
+- When news is present, weave headlines INTO your reasoning with inline citations like "(per ET, Apr 12)" or "(Moneycontrol headline)" pointing to specific items in `news.items`.
+- Where the data supports a causal read (e.g. price drop coincides with a headline date), say so — but mark it AS an inference, not as fact.
+- Explain MECHANISMS where you can: "extreme RSI <10 often precedes mean-reversion bounces" or "below-200-EMA + 50-EMA death cross = classic downtrend confirmation." Help the user LEARN, not just decide.
+- For each strength/risk bullet, cite ONE specific data point that backs it.
 
 Return STRICT JSON in this exact shape:
 {
-  "summary": "<2-3 sentence plain-English read of the stock's current state>",
-  "strengths": ["<bullet>", "<bullet>", ...],
-  "risks": ["<bullet>", "<bullet>", ...],
+  "summary": "<3-5 sentences. Start with the headline number (e.g. 'X is down N% over the last year, currently at ₹P'). Then a sentence on the trend structure (EMAs, drawdown). Then ONE sentence on what the news says or doesn't say. Cite specifics inline.>",
+  "strengths": ["<each bullet cites a specific data point>", ...],
+  "risks": ["<each bullet cites a specific data point>", ...],
   "recommendation": "<one of: BUY_WATCH | HOLD | TRIM | AVOID>",
   "confidence": "<low | medium | high>",
-  "rationale": "<one sentence on WHY this recommendation given the data>"
+  "rationale": "<one sentence: WHY this recommendation, citing the strongest piece of evidence>"
 }
 
 No markdown, no preamble. Just the JSON object."""
@@ -103,12 +109,15 @@ def analyze_stock(
     sector: str | None = None,
     news_signal: dict | None = None,   # news_sentiment, news_buzz, news_events, news_top
     holding: dict | None = None,       # entry_price, shares, days_held (optional)
+    technical_context: dict | None = None,  # from context.build_context() — rich evidence
     model: str = DEFAULT_MODEL,
     use_cache: bool = True,
 ) -> dict:
     """
     Run a Claude analysis on one stock. Returns a dict with the structured
     output plus metadata (model, cost estimate, cached flag).
+    The `payload` sent to the model is also returned in the result under
+    `payload_sent` so the UI can show users exactly what Claude saw.
     """
     payload = {
         "symbol": symbol.upper(),
@@ -117,6 +126,7 @@ def analyze_stock(
         "sector": sector,
         "news": news_signal or {},
         "holding": holding or {},
+        "technical_context": technical_context or {},
     }
 
     cache_key = (symbol.upper(), _hash_inputs(payload))
@@ -194,6 +204,7 @@ def analyze_stock(
         "cost_estimate_inr": round(cost_inr, 3),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cached": False,
+        "payload_sent": payload,
     }
 
     _CACHE[cache_key] = (time.time(), result)
