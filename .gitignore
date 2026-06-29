@@ -9,6 +9,7 @@ __pycache__/
 
 # App data — NEVER commit your personal holdings
 portfolio.json
+ai_usage.json
 price_cache/
 
 # OS / editor

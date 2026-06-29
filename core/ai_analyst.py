@@ -125,6 +125,12 @@ def analyze_stock(
         if time.time() - ts < CACHE_TTL_SECONDS:
             cached_copy = dict(cached)
             cached_copy["cached"] = True
+            try:
+                from . import ai_usage
+                ai_usage.log_call(symbol, cached.get("model", model),
+                                  0, 0, 0.0, cached=True)
+            except Exception:
+                pass
             return cached_copy
 
     try:
@@ -145,6 +151,11 @@ def analyze_stock(
             messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:
+        try:
+            from . import ai_usage
+            ai_usage.log_call(symbol, model, 0, 0, 0.0, cached=False, error=str(e))
+        except Exception:
+            pass
         return {"error": f"API call failed: {e}"}
 
     # extract text
@@ -186,6 +197,13 @@ def analyze_stock(
     }
 
     _CACHE[cache_key] = (time.time(), result)
+
+    try:
+        from . import ai_usage
+        ai_usage.log_call(symbol, model, in_tok, out_tok, cost_inr, cached=False)
+    except Exception:
+        pass
+
     return result
 
 

@@ -43,6 +43,7 @@ from core import advisor as ADV
 from core import broker as BRK
 from core import tax as TAX
 from core import ai_analyst as AI
+from core import ai_usage as AIU
 from core import groww_import as GW
 from data import data as D
 
@@ -205,9 +206,10 @@ atr_mult = st.sidebar.slider("Stop = N × ATR", 1.0, 4.0, 2.0, 0.5,
 reward_mult = st.sidebar.slider("Reward : Risk", 1.0, 4.0, 2.0, 0.5,
     help=GL.tip("Reward:risk"))
 
-tab1, tab7, tab2, tab3, tab6, tab8, tab4, tab5 = st.tabs(
+tab1, tab7, tab2, tab3, tab6, tab8, tab9, tab4, tab5 = st.tabs(
     ["📊 Screener", "🎯 Horizon View", "🔍 Stock", "💰 Trade Plan",
-     "📍 Positions", "📁 My Portfolio", "🧪 Backtest", "ℹ️ About"])
+     "📍 Positions", "📁 My Portfolio", "🪙 AI Usage",
+     "🧪 Backtest", "ℹ️ About"])
 
 # ===================== TAB 1: SCREENER =====================
 with tab1:
@@ -975,6 +977,94 @@ with tab8:
     st.caption("⚠️ Mechanical suggestions based on price/risk math, **not financial "
                "advice**. You decide and place orders in your broker. Consider taxes "
                "(STCG/LTCG) before selling.")
+
+# ===================== TAB 9: AI USAGE =====================
+with tab9:
+    st.title("🪙 AI Usage")
+    st.caption("Every Claude API call your app makes — logged locally to "
+               "`ai_usage.json` (gitignored, never leaves your Mac).")
+
+    summary_24h = AIU.summary(window_hours=24)
+    summary_7d = AIU.summary(window_hours=24*7)
+
+    # --- 24h headline ---
+    st.subheader("Last 24 hours")
+    m24 = st.columns(4)
+    m24[0].metric("Total calls", summary_24h["calls"],
+                  help="Every analysis you ran, billable or cached.")
+    m24[1].metric("Billable", summary_24h["billable_calls"],
+                  help="Calls that actually hit the API (cached calls cost ₹0).")
+    m24[2].metric("Tokens", f"{summary_24h['input_tokens'] + summary_24h['output_tokens']:,}",
+                  help=f"Input: {summary_24h['input_tokens']:,} · "
+                       f"Output: {summary_24h['output_tokens']:,}")
+    m24[3].metric("Cost", f"₹{summary_24h['cost_inr']:.2f}",
+                  help="Rough estimate using Claude Haiku 4.5 rates at USD-INR ≈ 83.")
+
+    if summary_24h["cached_calls"]:
+        st.caption(f"💾 {summary_24h['cached_calls']} call(s) served from the 1-hour cache — saved you money.")
+    if summary_24h["errors"]:
+        st.caption(f"⚠️ {summary_24h['errors']} call(s) failed (no charge for those).")
+
+    # --- 7-day chart ---
+    st.markdown("---")
+    st.subheader("Last 7 days")
+    daily = AIU.daily_breakdown(7)
+    if daily and any(d["calls"] > 0 for d in daily):
+        df_daily = pd.DataFrame(daily).set_index("date")
+        cc = st.columns(2)
+        cc[0].markdown("**Calls per day**")
+        cc[0].bar_chart(df_daily["calls"], height=240)
+        cc[1].markdown("**Cost per day (₹)**")
+        cc[1].bar_chart(df_daily["cost_inr"], height=240)
+        m7 = st.columns(3)
+        m7[0].metric("7-day calls", summary_7d["billable_calls"])
+        m7[1].metric("7-day tokens",
+                     f"{summary_7d['input_tokens'] + summary_7d['output_tokens']:,}")
+        m7[2].metric("7-day cost", f"₹{summary_7d['cost_inr']:.2f}")
+    else:
+        st.info("No AI calls yet. Click 🤖 AI Read on any stock to start tracking.")
+
+    # --- per-symbol breakdown for 24h ---
+    if summary_24h["by_symbol"]:
+        st.markdown("---")
+        st.subheader("By stock (last 24h)")
+        bs = pd.DataFrame.from_dict(summary_24h["by_symbol"], orient="index")
+        bs.index.name = "Symbol"
+        bs["cost_inr"] = bs["cost_inr"].round(3)
+        bs = bs.sort_values("cost_inr", ascending=False)
+        st.dataframe(bs, use_container_width=True, height=240)
+
+    # --- recent call log ---
+    st.markdown("---")
+    st.subheader("Recent calls (latest 50)")
+    recent = AIU.recent_calls(50)
+    if recent:
+        rdf = pd.DataFrame(recent)
+        if not rdf.empty and "ts" in rdf:
+            # show time in local-ish readable form
+            rdf["time"] = pd.to_datetime(rdf["ts"]).dt.strftime("%Y-%m-%d %H:%M")
+            cols = ["time", "symbol", "input_tokens", "output_tokens",
+                    "cost_inr", "cached", "error"]
+            rdf = rdf[[c for c in cols if c in rdf.columns]]
+            st.dataframe(rdf, use_container_width=True, height=300)
+    else:
+        st.caption("No calls logged yet.")
+
+    # --- safety / cost ceiling ---
+    st.markdown("---")
+    rc1, rc2 = st.columns([2, 1])
+    rc1.markdown("**Safety**")
+    rc1.caption(
+        "Claude Haiku 4.5 costs roughly ₹0.25–0.30 per AI Read at typical sizes. "
+        "Cache reduces repeat calls to ₹0 for 1 hour. There's no hard daily limit "
+        "in this app — keep an eye on the 24h cost above. Set spend alerts in "
+        "console.anthropic.com if you want a hard ceiling at the API level."
+    )
+    if rc2.button("🗑️ Clear usage history",
+                  help="Wipes ai_usage.json. The log is local-only either way."):
+        AIU.clear()
+        st.success("Cleared.")
+        st.rerun()
 
 # ===================== TAB 4: BACKTEST =====================
 with tab4:
