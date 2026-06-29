@@ -47,6 +47,7 @@ from core import ai_usage as AIU
 from core import news_rss as NR
 from core import context as CTX
 from core import groww_import as GW
+from core import screener_import as SI
 from data import data as D
 
 st.set_page_config(page_title="NSE Dual-Horizon Screener", layout="wide",
@@ -266,9 +267,9 @@ atr_mult = st.sidebar.slider("Stop = N × ATR", 1.0, 4.0, 2.0, 0.5,
 reward_mult = st.sidebar.slider("Reward : Risk", 1.0, 4.0, 2.0, 0.5,
     help=GL.tip("Reward:risk"))
 
-tab1, tab7, tab2, tab3, tab6, tab8, tab9, tab4, tab5 = st.tabs(
+tab1, tab7, tab2, tab3, tab6, tab8, tab9, tabFS, tab4, tab5 = st.tabs(
     ["📊 Screener", "🎯 Horizon View", "🔍 Stock", "💰 Trade Plan",
-     "📍 Positions", "📁 My Portfolio", "🪙 AI Usage",
+     "📍 Positions", "📁 My Portfolio", "🪙 AI Usage", "📐 Fundamental Screen",
      "🧪 Backtest", "ℹ️ About"])
 
 # ===================== TAB 1: SCREENER =====================
@@ -1134,6 +1135,156 @@ with tab9:
         AIU.clear()
         st.success("Cleared.")
         st.rerun()
+
+# ===================== TAB FS: FUNDAMENTAL SCREEN =====================
+with tabFS:
+    st.title("📐 Fundamental Screen")
+    st.caption("Import a Screener.in CSV → app applies its technical scoring "
+               "and (optionally) Claude AI Read on top. Three layers, each "
+               "doing what it's best at.")
+
+    with st.expander("📖 How this works", expanded=False):
+        st.markdown(
+            "**Workflow:**  \n"
+            "1. Open [screener.in](https://www.screener.in/screen/new/) and "
+            "build your fundamental query (P/E < 25, ROCE > 15%, etc).  \n"
+            "2. Click **Export to Excel/CSV**.  \n"
+            "3. Upload the file below.  \n"
+            "4. The app pulls live prices, runs its technical scoring on those "
+            "filtered names, and lets you AI-Read any of them.  \n\n"
+            "**Why this design?** Fundamentals change slowly (quarterly). "
+            "Real-time fundamentals would cost money and add latency for no benefit. "
+            "Screener.in already does this part perfectly — we just plug into it."
+        )
+
+    with st.expander("📋 Your 17-condition query (copy into Screener)"):
+        st.code(SI.DEFAULT_QUERY_SUGGESTION, language="text")
+
+    upload = st.file_uploader("Upload Screener.in CSV export", type=["csv"])
+    if upload is not None:
+        with st.spinner("Parsing fundamentals..."):
+            parsed = SI.parse_csv(upload)
+
+        for w in parsed["warnings"]:
+            st.warning(w)
+        if parsed["kept_count"] == 0:
+            st.error("No usable stocks in the file.")
+        else:
+            st.success(f"Parsed {parsed['kept_count']} stock(s). "
+                       f"Recognised columns: {', '.join(parsed['columns_recognised'].keys())}")
+            fund_df = SI.to_dataframe(parsed)
+
+            # store in session so AI Reads can reuse
+            st.session_state["fund_df"] = fund_df
+            st.session_state["fund_parsed"] = parsed
+
+    fund_df = st.session_state.get("fund_df")
+    parsed = st.session_state.get("fund_parsed")
+
+    if fund_df is not None and not fund_df.empty:
+        # --- run technical scoring on these symbols ---
+        st.markdown("---")
+        st.subheader("Combined view: fundamentals + technicals")
+
+        with st.spinner("Fetching live prices & technical scoring..."):
+            bench_for_fs = D.fetch_benchmark(period=period)
+            tech_rows = {}
+            ok_prices = {}
+            for sym in fund_df.index.tolist():
+                df_px = D.fetch_ohlcv(sym, period=period)
+                if df_px is not None and len(df_px) >= 30:
+                    feats = F.compute_all(df_px, bench_close=bench_for_fs)
+                    if feats:
+                        tech_rows[sym] = feats
+                        ok_prices[sym] = df_px
+
+        if not tech_rows:
+            st.warning("Couldn't fetch prices for any of the filtered symbols. "
+                       "Yfinance may be rate-limited, or symbols may need adjustment "
+                       "(some Screener tickers differ slightly from NSE codes).")
+        else:
+            tech_raw = pd.DataFrame.from_dict(tech_rows, orient="index")
+            tech_raw = SEC.attach_sectors(tech_raw)
+            tech_scored = S.score_universe(tech_raw, horizon=horizon, sector_neutral=False)
+            tech_scored["reason"] = tech_scored.apply(S.build_reason, axis=1)
+
+            # merge fundamentals + technical scores
+            combined = fund_df.join(
+                tech_scored[["final_score", "tactical_score", "structural_score", "reason"]],
+                how="left"
+            )
+            # priced indicator
+            combined["priced"] = combined.index.isin(tech_rows.keys())
+
+            cm1, cm2, cm3 = st.columns(3)
+            cm1.metric("Fundamentally qualified", len(fund_df))
+            cm2.metric("Priced + scored", int(combined["priced"].sum()))
+            cm3.metric("Avg final score",
+                       f"{combined['final_score'].mean():.2f}"
+                       if combined['final_score'].notna().any() else "—")
+
+            # sort by final_score (best technical setup among the fundamentally-good)
+            display = combined.sort_values("final_score", ascending=False, na_position="last")
+            # round score columns for readability
+            for c in ["final_score", "tactical_score", "structural_score"]:
+                if c in display:
+                    display[c] = display[c].round(2)
+
+            try:
+                styled = display.style.background_gradient(
+                    subset=[c for c in ["final_score"] if c in display],
+                    cmap="RdYlGn")
+            except (ImportError, Exception):
+                styled = display
+            st.dataframe(styled, use_container_width=True, height=440)
+
+            st.download_button("⬇️ Download combined view (CSV)",
+                               display.to_csv().encode(),
+                               "fundamental_plus_technical.csv")
+
+            # --- AI Read on the top scoring picks ---
+            st.markdown("---")
+            st.subheader("🤖 AI Read on top fundamental + technical picks")
+            st.caption("Pick a stock from the combined list — Claude reads its "
+                       "fundamentals (from your Screener export) PLUS technicals "
+                       "PLUS news, then gives a structured verdict.")
+
+            top_priced = display[display["priced"]].head(10).index.tolist()
+            if not top_priced:
+                st.info("No fully-scored names yet — try refreshing.")
+            else:
+                pick = st.selectbox("Stock for AI Read", top_priced, key="fs_pick")
+                if st.button("🤖 Run AI Read", key="fs_ai_btn"):
+                    with st.spinner(f"Building context for {pick}..."):
+                        df_px = ok_prices.get(pick)
+                        ctx_fs = CTX.build_context(df_px) if df_px is not None else {}
+                        headlines_fs = NR.fetch_headlines(pick, days_back=30, max_headlines=8)
+                        news_sig_fs = NR.summarize_for_ai(headlines_fs)
+                        # pull the fundamentals row for THIS stock
+                        fund_row = parsed["stocks"][
+                            next(i for i, s in enumerate(parsed["stocks"]) if s["symbol"] == pick)
+                        ] if any(s["symbol"] == pick for s in parsed["stocks"]) else {"fundamentals": {}}
+                        # merge fundamentals into the factors block — this is the
+                        # key part: NOW Claude actually has fundamentals to reason with.
+                        tech_factors = tech_scored.loc[pick].to_dict() if pick in tech_scored.index else {}
+                        combined_factors = {**tech_factors, "fundamentals": fund_row["fundamentals"]}
+                    with st.spinner("Asking Claude..."):
+                        ai_res = AI.analyze_stock(
+                            symbol=pick,
+                            factor_row=combined_factors,
+                            price_summary={"ltp": ctx_fs.get("ltp"),
+                                           "high_52w": ctx_fs.get("52w_high"),
+                                           "low_52w": ctx_fs.get("52w_low")},
+                            sector=SEC.sector_of(pick),
+                            news_signal=news_sig_fs,
+                            technical_context=ctx_fs,
+                        )
+                        st.session_state[f"fs_ai_{pick}"] = ai_res
+
+                if f"fs_ai_{pick}" in st.session_state:
+                    render_ai_read(st.session_state[f"fs_ai_{pick}"])
+    else:
+        st.info("Upload a Screener.in CSV above to start the combined analysis.")
 
 # ===================== TAB 4: BACKTEST =====================
 with tab4:
