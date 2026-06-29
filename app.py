@@ -371,6 +371,8 @@ with tab7:
                            f"horizon_{choice}_picks.csv")
 
 
+# ===================== TAB 2: STOCK DRILL-DOWN =====================
+with tab2:
     st.title("Stock Search & Analysis")
     st.caption("Type any NSE symbol (e.g. RELIANCE, IRCTC, ZOMATO) — analyzed live, "
                "even if it's not in the default universe.")
