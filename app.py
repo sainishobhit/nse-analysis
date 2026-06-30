@@ -1259,13 +1259,27 @@ with tabFS:
                 if c in display:
                     display[c] = display[c].round(2)
 
-            try:
-                styled = display.style.background_gradient(
-                    subset=[c for c in ["final_score"] if c in display],
-                    cmap="RdYlGn")
-            except (ImportError, Exception):
-                styled = display
-            st.dataframe(styled, use_container_width=True, height=440)
+            # Only apply gradient if final_score has at least one real value.
+            # On Streamlit Cloud, yfinance may be rate-limited → all NaN → crash.
+            has_scores = ("final_score" in display
+                          and display["final_score"].notna().any())
+            if has_scores:
+                try:
+                    styled = display.style.background_gradient(
+                        subset=["final_score"], cmap="RdYlGn")
+                    st.dataframe(styled, use_container_width=True, height=440)
+                except Exception:
+                    st.dataframe(display, use_container_width=True, height=440)
+            else:
+                st.dataframe(display, use_container_width=True, height=440)
+                if "final_score" in display:
+                    st.warning(
+                        "⚠️ Couldn't fetch live prices for any of these symbols. "
+                        "Yfinance is likely being rate-limited on this host. "
+                        "Fundamentals are shown, but no technical score / AI Read "
+                        "can run until prices come through. Try refreshing in a "
+                        "few minutes, or run the app locally."
+                    )
 
             st.download_button("⬇️ Download combined view (CSV)",
                                display.to_csv().encode(),
